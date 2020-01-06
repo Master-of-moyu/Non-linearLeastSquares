@@ -3,12 +3,13 @@
 #include <iostream>
 #include <iomanip>
 #include <math.h>
+#include "log.h"
 
 using namespace std;
 using namespace Eigen;
 
 const double DERIV_STEP = 1e-5;
-const int MAX_ITER = 100;
+const int MAX_ITER = 200;
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 
@@ -71,20 +72,22 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
     int errNum = input.rows();   //error num
     int paraNum = params.rows(); //parameter num
 
-    VectorXd obj = objF(input, output, params); // residuals
+    VectorXd obj = objF(input, output, params);    // residuals
     MatrixXd Jac = Jacobin(input, output, params); //jacobin
     VectorXd gradient = Jac.transpose() * obj;     //gradient
 
     //initial parameter tao v epsilon1 epsilon2
-    double eps1 = 1e-12, eps2 = 1e-12, eps3 = 1e-12;
+    double eps1 = 1e-12, eps2 = 1e-12;
     double radius = 1.0;
 
-    bool found = obj.norm() <= eps3 || gradient.norm() <= eps1;
+    bool found = obj.norm() <= eps1 || gradient.norm() <= eps1;
     if (found) return;
 
     double last_sum = 0;
     int iterCnt = 0;
     while (iterCnt < MAX_ITER) {
+        log_debug(" ");
+        log_debug("iter: %d", iterCnt);
         VectorXd obj = objF(input, output, params);
         MatrixXd Jac = Jacobin(input, output, params); //jacobin
         VectorXd gradient = Jac.transpose() * obj;     //gradient
@@ -93,7 +96,7 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
             cout << "stop F'(x) = g(x) = 0 for a global minimizer optimizer." << endl;
             break;
         }
-        if (obj.norm() <= eps3) {
+        if (obj.norm() <= eps1) {
             cout << "stop f(x) = 0 for f(x) is so small";
             break;
         }
@@ -103,16 +106,19 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
         //compute gauss newton step and stepest descent step.
         VectorXd stepest_descent = -alpha * gradient;
         VectorXd gauss_newton = (Jac.transpose() * Jac).inverse() * Jac.transpose() * obj * (-1);
+        log_debug("radius: %lf, stepest_descent: %lf, GN: %lf", radius, alpha * stepest_descent.norm(), gauss_newton.norm());
 
         double beta = 0;
 
         //compute dog-leg step.
         VectorXd dog_leg(params.rows());
-        if (gauss_newton.norm() <= radius)
+        if (gauss_newton.norm() <= radius) {
             dog_leg = gauss_newton;
-        else if (alpha * stepest_descent.norm() >= radius)
+            log_debug("use GN");
+        } else if (alpha * stepest_descent.norm() >= radius) {
             dog_leg = (radius / stepest_descent.norm()) * stepest_descent;
-        else {
+            log_debug("use stepest_descent");
+        } else {
             VectorXd a = alpha * stepest_descent;
             VectorXd b = gauss_newton;
             double c = a.transpose() * (b - a);
@@ -120,12 +126,11 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
                    / (b - a).squaredNorm();
 
             dog_leg = alpha * stepest_descent + beta * (gauss_newton - alpha * stepest_descent);
+            log_debug("use both");
         }
+        // log_debug("dogleg step: %lf  %lf  %lf  %lf ", dog_leg[0], dog_leg[1], dog_leg[2], dog_leg[3]);
 
-        cout << "dog-leg: " << endl
-             << dog_leg << endl;
-
-        if (dog_leg.norm() <= eps2 * (params.norm() + eps2)) {
+        if (dog_leg.norm() <= 1e-8) {
             cout << "stop because change in x is small" << endl;
             break;
         }
@@ -133,8 +138,8 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
         VectorXd new_params(params.rows());
         new_params = params + dog_leg;
 
-        cout << "new parameter is: " << endl
-             << new_params << endl;
+        // cout << "new parameter is: " << endl
+        //      << new_params << endl;
 
         //compute f(x)
         obj = objF(input, output, params);
@@ -143,6 +148,7 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
 
         //compute delta F = F(x) - F(x_new)
         double deltaF = Func(obj) - Func(obj_new);
+        log_debug("cost old: %lf, cost new: %lf", Func(obj), Func(obj_new));
 
         //compute delat L =L(0)-L(dog_leg)
         double deltaL = 0;
@@ -163,23 +169,77 @@ void dogLeg(const VectorXd& input, const VectorXd& output, VectorXd& params) {
         double roi = deltaF / deltaL;
         if (roi > 0) {
             params = new_params;
+            // log_debug("new para: %lf  %lf  %lf  %lf", params[0], params[1], params[2], params[3]);
         }
         if (roi > 0.75) {
             radius = max(radius, 3.0 * dog_leg.norm());
         } else if (roi < 0.25) {
-            radius = radius / 2.0;
+            if (gauss_newton.norm() <= radius && roi <= 0) {
+                radius = gauss_newton.norm() / 5.0;
+            } else {
+                radius = radius / 2.0;
+            }
+
             if (radius <= eps2 * (params.norm() + eps2)) {
                 cout << "trust region radius is too small." << endl;
                 break;
             }
         }
-
-        cout << "roi: " << roi << " dog-leg norm: " << dog_leg.norm() << endl;
-        cout << "radius: " << radius << endl;
-
+        log_debug("roi: %lf, dogleg norm: %lf", roi, dog_leg.norm());
         iterCnt++;
-        cout << "Iterator " << iterCnt << " times" << endl
-             << endl;
+    }
+}
+
+void LM(const VectorXd& input, const VectorXd& output, VectorXd& params) {
+    double cost_old = 0.0, cost_new = 0.0;
+    double lambda = 0.01;
+    int errNum = input.rows();   //error num
+    int paraNum = params.rows(); //parameter num
+
+    VectorXd obj = objF(input, output, params);    // residuals
+    MatrixXd Jac = Jacobin(input, output, params); //jacobin
+    VectorXd b = -Jac.transpose() * obj;           //gradient
+    cost_old = Func(obj);
+
+    for (int iter = 0; iter < MAX_ITER; iter++) {
+        log_debug(" ");
+        log_debug("iter: %d, lambda: %lf", iter, lambda);
+        Matrix4d H = Jac.transpose() * Jac;
+        for (int i = 0; i < H.cols(); i++)
+            H(i, i) *= (1 + lambda);
+
+        //solve
+        Vector4d delta = H.colPivHouseholderQr().solve(b);
+
+        if ((bool)std::isnan((double)delta[0])) {
+            // T_new = T_old;
+            break;
+        }
+
+        if (delta.maxCoeff() < 1e-10) {
+            log_debug("converged!");
+            break;
+        }
+
+        // update
+        cost_new = 0.0;
+        params += delta;
+
+        obj = objF(input, output, params);
+        cost_new = Func(obj);
+        if (cost_new < cost_old) {
+            // accept and update
+            lambda /= 2;
+            cost_old = cost_new;
+            if (lambda < 1e-6) lambda = 1e-6;
+        } else {
+            params -= delta;
+            lambda *= 3;
+            obj = objF(input, output, params);    // residuals
+            Jac = Jacobin(input, output, params); //jacobin
+            b = -Jac.transpose() * obj;           //gradient
+            if (lambda > 1000) lambda = 1000;
+        }
     }
 }
 
@@ -194,7 +254,7 @@ int main(int argc, char* argv[]) {
     VectorXd input(total_data);
     VectorXd output(total_data);
 
-    double A = 5, B = 1, C = 10, D = 2;
+    double A = 5.0, B = 1.0, C = 10.0, D = 2.0;
     //load observation data
     for (int i = 0; i < total_data; i++) {
         //generate a random variable [-10 10]
@@ -215,17 +275,9 @@ int main(int argc, char* argv[]) {
     VectorXd params_dogLeg = params_gaussNewton;
 
     dogLeg(input, output, params_dogLeg);
+    LM(input, output, params_levenMar);
 
-    // cout << "gauss newton parameter: " << endl
-    //      << params_gaussNewton << endl
-    //      << endl
-    //      << endl;
-    // cout << "Levenberg-Marquardt parameter: " << endl
-    //      << params_levenMar << endl
-    //      << endl
-    //      << endl;
-    cout << "dog-leg parameter: " << endl
-         << params_dogLeg << endl
-         << endl
-         << endl;
+    log_debug("ground  truth: %lf  %lf  %lf  %lf", A, B, C, D);
+    log_debug("dogleg  estim: %lf  %lf  %lf  %lf", params_dogLeg[0], params_dogLeg[1], params_dogLeg[2], params_dogLeg[3]);
+    log_debug("levenMa estim: %lf  %lf  %lf  %lf", params_levenMar[0], params_levenMar[1], params_levenMar[2], params_levenMar[3]);
 }
