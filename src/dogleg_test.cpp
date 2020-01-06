@@ -3,6 +3,7 @@
 #include <iostream>
 #include <iomanip>
 #include <math.h>
+#include <ceres/ceres.h>
 #include "log.h"
 
 using namespace std;
@@ -12,6 +13,21 @@ const double DERIV_STEP = 1e-5;
 const int MAX_ITER = 200;
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
+
+class curve_fitting_cost {
+  public:
+    curve_fitting_cost(double x, double y) :
+        _x(x), _y(y) {
+    }
+
+    template <typename T>
+    bool operator()(const T* const a, const T* const b, const T* const c, const T* const d, T* residual) const {
+        residual[0] = T(_y) - (a[0] * sin(b[0] * T(_x)) + c[0] * cos(d[0] * T(_x)));
+        return true;
+    }
+
+    const double _x, _y;
+};
 
 double func(const VectorXd& input, const VectorXd& output, const VectorXd& params, double objIndex) {
     // obj = A * sin(Bx) + C * cos(D*x) - F
@@ -202,21 +218,21 @@ void LM(const VectorXd& input, const VectorXd& output, VectorXd& params) {
     cost_old = Func(obj);
 
     for (int iter = 0; iter < MAX_ITER; iter++) {
-        log_debug(" ");
-        log_debug("iter: %d, lambda: %lf", iter, lambda);
+        // log_debug(" ");
+        // log_debug("iter: %d, lambda: %lf", iter, lambda);
         Matrix4d H = Jac.transpose() * Jac;
         for (int i = 0; i < H.cols(); i++)
             H(i, i) *= (1 + lambda);
 
         //solve
-        Vector4d delta = H.colPivHouseholderQr().solve(b);
+        Vector4d delta = H.inverse() * b;
 
         if ((bool)std::isnan((double)delta[0])) {
             // T_new = T_old;
             break;
         }
 
-        if (delta.maxCoeff() < 1e-10) {
+        if (delta.norm() < 1e-10) {
             log_debug("converged!");
             break;
         }
@@ -240,14 +256,14 @@ void LM(const VectorXd& input, const VectorXd& output, VectorXd& params) {
             b = -Jac.transpose() * obj;           //gradient
             if (lambda > 1000) lambda = 1000;
         }
+        log_debug("iter: %d, cost: %lf, lambda: %lf", iter, cost_old, lambda);
     }
 }
 
-int main(int argc, char* argv[]) {
+int main() {
     // obj = A * sin(Bx) + C * cos(D*x) - F
     //there are 4 parameter: A, B, C, D.
     int num_params = 4;
-
     //generate random data using these parameter
     int total_data = 100;
 
@@ -276,8 +292,31 @@ int main(int argc, char* argv[]) {
 
     dogLeg(input, output, params_dogLeg);
     LM(input, output, params_levenMar);
+    //ceres
+    double para1, para2, para3, para4;
+    para1 = params_gaussNewton[0];
+    para2 = params_gaussNewton[1];
+    para3 = params_gaussNewton[2];
+    para4 = params_gaussNewton[3];
+    {
+        ceres::Problem problem;
+        for (int i = 0; i < total_data; i++) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<curve_fitting_cost, 1, 1, 1, 1, 1>(
+                    new curve_fitting_cost(input[i], output[i])),
+                nullptr, &para1, &para2, &para3, &para4);
+        }
+
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_QR;
+        options.trust_region_strategy_type = ceres::DOGLEG;
+
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+    }
 
     log_debug("ground  truth: %lf  %lf  %lf  %lf", A, B, C, D);
     log_debug("dogleg  estim: %lf  %lf  %lf  %lf", params_dogLeg[0], params_dogLeg[1], params_dogLeg[2], params_dogLeg[3]);
-    log_debug("levenMa estim: %lf  %lf  %lf  %lf", params_levenMar[0], params_levenMar[1], params_levenMar[2], params_levenMar[3]);
+    log_debug("     LM estim: %lf  %lf  %lf  %lf", params_levenMar[0], params_levenMar[1], params_levenMar[2], params_levenMar[3]);
+    log_debug("  ceres estim: %lf  %lf  %lf  %lf", para1, para2, para3, para4);
 }
