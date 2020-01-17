@@ -7,6 +7,16 @@
 #include <ceres/ceres.h>
 #include "log.h"
 
+// notice:
+// new_model_cost
+//  = 1/2 [f + J * step]^2
+//  = 1/2 [ f'f + 2f'J * step + step' * J' * J * step ]
+// model_cost_change
+//  = cost - new_model_cost
+//  = f'f/2  - 1/2 [ f'f + 2f'J * step + step' * J' * J * step]
+//  = -f'J * step - step' * J' * J * step / 2
+//  = -(J * step)'(f + J * step / 2)
+
 using namespace std;
 using namespace Eigen;
 
@@ -110,14 +120,15 @@ class LMOptimization {
             log_debug("iter: %d", iter);
 
             compute_residual_jacobian(Jacobian, errors, m_, c_);
+            cost_old = errors.squaredNorm() * 0.5;
             VectorXd gradient = Jacobian.transpose() * errors; //gradient
 
             if (gradient.norm() <= eps1) {
-                cout << "stop F'(x) = g(x) = 0 for a global minimizer optimizer." << endl;
+                log_debug("stop F'(x) = g(x) = 0 for a global minimizer optimizer.");
                 break;
             }
             if (errors.norm() <= eps1) {
-                cout << "stop f(x) = 0 for f(x) is so small";
+                log_debug("stop f(x) = 0 for f(x) is so small");
                 break;
             }
 
@@ -129,14 +140,13 @@ class LMOptimization {
             log_debug("  radius: %lf, stepest_descent: %lf, GN: %lf", radius, alpha * stepest_descent.norm(), gauss_newton.norm());
 
             double beta = 0;
-
             //compute dog-leg step.
             Vector2d dog_leg;
             if (gauss_newton.norm() <= radius) {
                 dog_leg = gauss_newton;
                 log_debug("  use GN");
-            } else if (alpha * stepest_descent.norm() >= radius) {
-                dog_leg = (radius / stepest_descent.norm()) * stepest_descent;
+            } else if (gradient.norm() * alpha >= radius) {
+                dog_leg = (-radius / gradient.norm()) * gradient;
                 log_debug("  use stepest_descent");
             } else {
                 VectorXd a = alpha * stepest_descent;
@@ -158,38 +168,25 @@ class LMOptimization {
             m_new = m_ + dog_leg[0];
             c_new = c_ + dog_leg[1];
 
-            // compute_residual_jacobian(Jacobian, errors, m_, c_);
-            compute_residual_jacobian(Jacobian, errors, m_, c_);
-            cost_old = errors.squaredNorm() * 0.5;
-            Matrix<double, 1, 2> g = errors.transpose() * Jacobian; //gradient
+            double model_cost_change = 0;
+            double a = 0.5 * dog_leg.transpose() * Jacobian.transpose() * Jacobian * dog_leg;
+            model_cost_change = -(gradient.transpose() * dog_leg + a);
+
+            log_debug("  model_cost_change: %lf", model_cost_change);
+
             compute_residual_jacobian(Jacobian, errors, m_new, c_new);
             cost_new = errors.squaredNorm() * 0.5;
+            if (cost_new > cost_old) { // rejected
+                radius *= 0.5;
+                continue;
+            }
 
             //compute delta F = F(x) - F(x_new)
             double deltaF = cost_old - cost_new;
             log_debug("  dogleg: %lf %lf, norm: %lf", dog_leg[0], dog_leg[1], dog_leg.norm());
             log_debug("  cost old: %lf, cost new: %lf, para old: %lf %lf, para new: %lf %lf", cost_old, cost_new, m_, c_, m_new, c_new);
 
-            // compute delat L =L(0)-L(dog_leg)
-            double deltaL = 0;
-            // double a = 0.5 * dog_leg.transpose() * Jacobian.transpose() * Jacobian * dog_leg;
-            // deltaL = g * dog_leg + a;
-
-            if (gauss_newton.norm() <= radius)
-                deltaL = cost_old;
-            else if (alpha * stepest_descent.norm() >= radius)
-                deltaL = radius * (2 * alpha * gradient.norm() - radius) / (2.0 * alpha);
-            else {
-                VectorXd a = alpha * stepest_descent;
-                VectorXd b = gauss_newton;
-                double c = a.transpose() * (b - a);
-                beta = (sqrt(c * c + (b - a).squaredNorm() * (radius * radius - a.squaredNorm())) - c)
-                       / (b - a).squaredNorm();
-
-                deltaL = alpha * (1 - beta) * (1 - beta) * gradient.squaredNorm() / 2.0 + beta * (2.0 - beta) * cost_old;
-            }
-
-            double roi = deltaF / deltaL;
+            double roi = deltaF / model_cost_change;
             if (roi > 0) {
                 m_ = m_new;
                 c_ = c_new;
